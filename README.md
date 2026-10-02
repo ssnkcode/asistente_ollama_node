@@ -4,7 +4,7 @@ Asistente de desarrollo en terminal, **100% local**, que corre sobre **Ollama** 
 No hay servidores, ni APIs de pago, ni cuentas: el modelo se ejecuta en tu propia máquina y el
 agente tiene acceso directo a tu sistema de archivos, a `cmd.exe`, a internet y a GitHub.
 
-La persona del asistente es **"Cristian HERMOSO"** (constante `NOMBRE` en `index.js`).
+La persona del asistente es **"Cristian"** (constante `NOMBRE` en `index.js`).
 
 ---
 
@@ -88,7 +88,7 @@ válida, vuelve a preguntar (no elige por vos).
 Luego quedás en un REPL:
 
 ```
-🤖 Cristian HERMOSO — Asistente IA local (Windows 11)
+🤖 Cristian — Asistente IA local (Windows 11)
    Modelo: qwen2.5-coder:7b
    Directorio: F:\upc\mi-asistente
    Escribí "salir" para terminar.
@@ -312,7 +312,7 @@ No hay archivo de configuración externo. Los puntos de ajuste son constantes en
 
 | Qué | Dónde | Actual |
 |---|---|---|
-| Nombre/persona del asistente | `index.js` → `NOMBRE` | `Cristian HERMOSO` |
+| Nombre/persona del asistente | `index.js` → `NOMBRE` | `Cristian` |
 | Iteraciones por turno | `index.js` → `MAX_ITERACIONES` | `15` |
 | Reintentos para obtener JSON | `index.js` → `MAX_INTENTOS_ACCION` | `3` |
 | Verbos que disparan el modo "acción" | `index.js` → `VERBOS_ACCION` | ~70 formas (voseo rioplatense) |
