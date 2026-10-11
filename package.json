@@ -5,14 +5,24 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@vscode/ripgrep": "^1.18.0",
     "chalk": "^6.0.1",
-    "ollama": "^0.6.4"
+    "chokidar": "^5.0.0",
+    "ignore": "^7.0.12",
+    "ollama": "^0.6.4",
+    "tinyglobby": "^0.2.17",
+    "tree-sitter": "^0.25.1",
+    "tree-sitter-javascript": "^0.25.0"
+  },
+  "allowScripts": {
+    "tree-sitter@0.25.1": true,
+    "tree-sitter-javascript@0.25.0": true
   }
 }

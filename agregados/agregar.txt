@@ -1,0 +1,32 @@
+1. que muestre la cantidad de tokens usados y los que faltan por usar
+
+1.1. que pueda tener memoria persistente con una base de datos en PostgreSQL por ejemplo para que recuerde código de programación, nombres, fechas o cosas antiguas, que te pregunte por información que le quieres enseñar si la quieres guardar en la DB para luego recordarla 
+
+1.2. agregar rag al programa, que el rag sea preciso y que no divague nada y relate únicamente sobre el documento que le estoy pasando cuando se elija la opción de rag en el programa
+
+2. que pueda usar guarda comandos en una base de datos (PostgreSQL) que luego cuando le pida que los ejecute los ejecute y fijarce la manera de que no trate de ejecutarlos con la decisión de la IA si no que si le digo hace A haga B sin tomar decisiones propias, ósea que me haga caso si o si
+
+3. que pueda crear pdf con el contenido que le ordene
+
+4. que pueda leer pagina web, libros pdf o documentos y que los scanee y haga un resumen preciso consiso y finito de lo que scaneo, y fijarse la manera de mejorar los resúmenes donde la IA no divaga ósea que el código del programa tenga una estructura que haga que el resumen sea perfecto y sin equivocaciones
+
+
+------------------------------------------------------------------------------------------------------------------
+
+1. site: + comillas exactas en buscar_web — es lo primero y lo más barato. Lo que te falta para tu caso es esto: hoy el agente le pasa "cristian sasinka" a Bing a pelo. Con site:linkedin.com/in "Cristian Sasinka", site:github.com, site:instagram.com en paralelo, pegarle a tu huella pública. Es un cambio chico en código que ya tenés.
+2. Sherlock — segundo, no primero.porque sin usernames no hace nada: busca usuario → cuentas, no nombre → persona. Solo suma valor si ya tenés el @usuario y querés mapear dónde más existe. Igual te sirve para lo tuyo, que ya lo conocés.
+3. Casas — fácil, pero es lo que menos te aporta. Es un parser más y ya está.
+4. PhoneInfoga — al final. Los teléfonos y emails de terceros son hoy lo más difícil de obtener: casi todo está detrás de paywalls o portales de datos. Bajo retorno para el esfuerzo. 
+
+
+-----------------------------------------------------------------------------------------------------------------
+
+1. Crear sherlock.js con el runner (execFile, parseo de [+] Plataforma: URL, timeout, borrado del archivo temporal)
+2. Registrar la acción buscar_usuario en acciones.js
+3. Conectar cada URL encontrada con registrarFuente para que el verificador no bloquee la respuesta
+4. Agregar buscar_usuario a la lista de acciones y al system prompt de index.js
+5. Tests con salida simulada de Sherlock (sin red)
+6. Correr los tests y probar contra la red con tu usuario real
+
+
+opencode -s ses_f01e23412ffe78ErUAUeIaBBh3

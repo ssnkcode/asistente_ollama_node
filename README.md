@@ -278,12 +278,36 @@ Todas las acciones de filesystem pasan por `rutaSegura()`, que resuelve la ruta 
 - **Máximo 2 búsquedas** por pregunta (regla del system prompt).
 - Doble `Esc` aborta el stream en cualquier momento.
 
+### Verificador de veracidad (fail-closed)
+
+El proyecto incluye un **gate determinístico** (`verificador.js`) que garantiza: **nada llega a pantalla sin estar respaldado por una fuente real**.
+
+- **Registro de fuentes**: `registrarFuente()` guarda el system prompt, la entrada del usuario y todo resultado de acciones (`buscar_web`, `leer_url`, `buscar_github`, `ver_repo`, etc.). Solo lo que está ahí puede usarse para afirmar un dato.
+- **Protocolo de citas obligatorio**: cuando el modelo afirma un dato (número, fecha, año, nombre, URL, repo, cantidad...), debe responder exclusivamente con `{"cita": ["fragmento literal exacto de la fuente", "..."]}`. Cada fragmento debe aparecer **carácter por carácter** en alguna fuente registrada.
+- **Texto libre solo sin datos**: respuestas conversacionales sin afirmaciones pasan, pero cualquier candidato factual (extraído con `extraerCandidatos`) que no exista en las fuentes **bloquea toda la respuesta**.
+- **Bloqueo de evasivas y repetición**: frases como *"no puedo", "no estoy seguro", "podría ser", "te sugiero..."* se detectan y bloquean (`PHRASES_BLOQUEADAS`). También se bloquea si una oración se repite 3 o más veces.
+- **Validación de URLs/repos**: `urlVerificada()` y `repoVerificado()` solo permiten usar URLs/repos que **aparecieron previamente** en alguna fuente. Esto evita que el modelo invente enlaces desde cero.
+- **Fail-closed**: si no se puede probar, **no se imprime**. Nunca completa de memoria ni "más o menos". Toda verificación es determinística (string match literal, sin heurística).
+- **Bufferización del stream**: `index.js` acumula toda la respuesta del modelo **sin imprimir token por token**; solo se muestra después de pasar el verificador. Si falla, el texto nunca llega a stdout.
+
+### Conteo de tokens
+
+El asistente muestra, después de cada respuesta, cuántos tokens se usaron y cuántos quedan disponibles:
+
+```
+[asistente] Hola
+   [tokens: 48 usados / 32720 restantes (contexto 32768)]
+```
+
+- **Fuente de datos**: Ollama devuelve `prompt_eval_count` (tokens de entrada) y `eval_count` (tokens de salida) en `/api/chat` con `stream:false` (`tokens.js` → `chatConStats`).
+- **Cálculo**: `tokens usados = prompt_eval_count + eval_count`.
+- **Contexto disponible**: se intenta leer del modelo vía `api/show` (`tokens.js` → `obtenerInfoModelo`) buscando campos como `qwen2.context_length`, `llama.context_length` o `general.context_length`. Si no se puede determinar, solo muestra los tokens usados: `[tokens: 48 usados]`.
+- **Nota**: al usar `stream:false` para obtener las estadísticas, el tiempo de respuesta puede variar ligeramente respecto a `stream:true`, pero se gana trazabilidad exacta de consumo por turno.
+
 ### System prompt
 
 `construirSystemPrompt()` (`index.js:46`) define la personalidad, el formato JSON obligatorio, las
-12 acciones con sus parámetros, las reglas de refactorizado, las de búsqueda y varios ejemplos
-*obligatorios* de respuesta. También fuerza explícitamente al modelo a **no negarse a buscar** y a
-**no inventar datos**.
+12 acciones con sus parámetros, las reglas de refactorizado, las de búsqueda, el **Protocolo de Veracidad** (obligatorio con `{"cita": [...]}`) y varios ejemplos. También fuerza explícitamente al modelo a **no negarse a buscar** y a **no inventar datos**.
 
 ---
 

@@ -2,7 +2,8 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs/promises';
 import path from 'path';
-import { buscarWeb, buscarGithub, verRepo, leerUrl } from './buscar.js';
+import { buscarWeb, buscarGithub, verRepo, leerUrl, buscarPorSitios, formatearPersona, extraerNombre, SITIOS_PERFIL } from './buscar.js';
+import { buscarPorUsuario, formatearSherlock, sherlockInstalado } from './sherlock.js';
 
 const execAsync = promisify(exec);
 
@@ -99,6 +100,25 @@ export const acciones = {
 
   async buscar_github({ consulta, limite = 5 }) {
     return buscarGithub({ consulta, limite });
+  },
+
+  // Barrido de perfiles públicos: interroga cada plataforma con site: y
+  // comillas exactas, y descarta lo que no mencione el nombre completo.
+  async buscar_persona({ nombre, limite = 8 }) {
+    const limpio = extraerNombre(nombre) || String(nombre || '').trim();
+    if (!limpio) throw new Error('Falta el parámetro "nombre"');
+    const r = await buscarPorSitios(limpio, { limite });
+    return formatearPersona(limpio, r);
+  },
+
+  // Sherlock: busca un @usuario en ~400 plataformas. Es usuario → cuentas,
+  // NO nombre → persona. Tarda entre 30 y 90s porque son 400 requests.
+  async buscar_usuario({ usuario, limite = 40, tiempo = 15 }) {
+    if (!(await sherlockInstalado())) {
+      throw new Error('Sherlock no está instalado. Instalalo con: pipx install sherlock-project');
+    }
+    const r = await buscarPorUsuario({ usuario, limite, tiempo });
+    return formatearSherlock(r);
   },
 
   async ver_repo({ repo }) {

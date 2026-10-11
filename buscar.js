@@ -57,7 +57,9 @@ function destaparUrlBing(hrefCrudo) {
 
 function parsearBing(html, limite) {
   const resultados = [];
-  const bloques = html.split('<li class="b_algo"').slice(1, limite + 1);
+  // Se piden más bloques que los que se van a mostrar, para tener margen
+  // después de filtrar por relevancia.
+  const bloques = html.split('<li class="b_algo"').slice(1, (limite * 4) + 1);
 
   for (const bloque of bloques) {
     const h2 = bloque.match(/<h2[^>]*>([\s\S]*?)<\/h2>/);
@@ -82,6 +84,78 @@ function parsearBing(html, limite) {
   return resultados;
 }
 
+// ---------- Filtro de relevancia ----------
+// Sin esto, Bing devuelve lo que le parece: si buscás "Cristian Sasinka" te
+// tira un supermercado y a Cristiano Ronaldo, porque ambos tienen "Cristian".
+// Cada resultado se puntúa según cuántas palabras de la consulta aparecen
+// realmente en el título, la URL o el snippet. Los que no tienen nada que ver
+// se descartan, en vez de devolverlos como si fueran la respuesta.
+const STOPWORDS_BUSQUEDA = new Set([
+  'de', 'del', 'la', 'el', 'los', 'las', 'un', 'una', 'unos', 'unas', 'y', 'o',
+  'en', 'con', 'para', 'por', 'que', 'es', 'son', 'al', 'a', 'the', 'of', 'and',
+  'with', 'for', 'in', 'on', 'to', 'me', 'mi', 'yo', 'tu', 'se', 'su', 'sus',
+  'cual', 'cuál', 'quien', 'quién', 'donde', 'dónde', 'cuanto', 'cuánto',
+  'buscar', 'buscame', 'buscá', 'buscaren', 'informacion', 'información',
+  'datos', 'info', 'sobre', 'acerca', 'persona', 'nombre'
+]);
+
+function sinAcentos(t) {
+  return String(t).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
+export function palabrasClave(consulta) {
+  return sinAcentos(consulta)
+    .replace(/["']/g, '')
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean)
+    .filter(p => p.length >= 3 && !STOPWORDS_BUSQUEDA.has(p));
+}
+
+// Puntúa un resultado: +6 por palabra clave en el título, +3 en la URL,
+// +2 en el snippet. Devuelve además cuántas palabras clave encontró.
+export function puntuarResultado(resultado, claves) {
+  if (claves.length === 0) return { puntos: 0, coincidencias: 0 };
+  const titulo = sinAcentos(resultado.titulo || '');
+  const url = sinAcentos(resultado.url || '');
+  const snippet = sinAcentos(resultado.snippet || '');
+  const dominio = sinAcentos(resultado.dominio || '');
+
+  let puntos = 0;
+  let coincidencias = 0;
+
+  for (const clave of claves) {
+    let sla = false;
+    if (titulo.includes(clave)) { puntos += 6; sla = true; }
+    if (url.includes(clave)) { puntos += 3; sla = true; }
+    if (dominio.includes(clave)) { puntos += 3; sla = true; }
+    if (snippet.includes(clave)) { puntos += 2; sla = true; }
+    if (sla) coincidencias++;
+  }
+
+  return { puntos, coincidencias };
+}
+
+// Exige que el resultado mentione la mayoría de las palabras clave. Con
+// consultas de nombre propio ("cristian sasinka") esto descarta todo lo que
+// solo comparta el primer nombre.
+export function filtrarPorRelevancia(resultados, consulta, limite) {
+  const claves = palabrasClave(consulta);
+
+  // Si la consulta es tan corta que no queda una sola palabra útil, no se
+  // puede filtrar: se devuelven los resultados tal cual.
+  if (claves.length === 0) return resultados.slice(0, limite);
+
+  const puntuados = resultados.map(r => ({ r, ...puntuarResultado(r, claves) }));
+
+  const requeridas = claves.length === 1 ? 1 : Math.ceil(claves.length * 0.6);
+  const relevantes = puntuados
+    .filter(p => p.coincidencias >= requeridas)
+    .sort((a, b) => b.puntos - a.puntos)
+    .map(p => p.r);
+
+  return relevantes.slice(0, limite);
+}
+
 function parsearWikipedia(json) {
   const out = [];
   if (json.AbstractText) {
@@ -104,7 +178,186 @@ function parsearWikipedia(json) {
   return out;
 }
 
-function formatear(consulta, resultados, motor) {
+// ---------- Búsqueda de personas por redes/perfiles públicos ----------
+// La búsqueda general ("cristian sasinka") devuelve lo que Bing quiera: un
+// supermercado, un cantante. Para encontrar la huella pública de una persona
+// hay que preguntarle a cada plataforma por separado, con comillas exactas
+// alrededor del nombre: site:github.com "Cristian Sasinka".
+//
+// Esta lista es genérica a propósito: sirve para cualquier persona, no hay
+// ningún nombre hardcodeado. Los dominios que se agencia a sí mismos (LinkedIn,
+// Facebook, Instagram) suelen devolver poco o nada porque ya no se indexan,
+// pero el resto funciona.
+export const SITIOS_PERFIL = [
+  { dominio: 'github.com', etiqueta: 'GitHub' },
+  { dominio: 'linkedin.com', etiqueta: 'LinkedIn' },
+  { dominio: 'instagram.com', etiqueta: 'Instagram' },
+  { dominio: 'facebook.com', etiqueta: 'Facebook' },
+  { dominio: 'x.com', etiqueta: 'X (Twitter)' },
+  { dominio: 'twitter.com', etiqueta: 'Twitter' },
+  { dominio: 'youtube.com', etiqueta: 'YouTube' },
+  { dominio: 'tiktok.com', etiqueta: 'TikTok' },
+  { dominio: 'reddit.com', etiqueta: 'Reddit' },
+  { dominio: 'medium.com', etiqueta: 'Medium' },
+  { dominio: 'stackoverflow.com', etiqueta: 'Stack Overflow' },
+  { dominio: 'behance.net', etiqueta: 'Behance' },
+  { dominio: 'dribbble.com', etiqueta: 'Dribbble' },
+  { dominio: 'gitlab.com', etiqueta: 'GitLab' },
+  { dominio: 'kaggle.com', etiqueta: 'Kaggle' },
+  { dominio: 'pinterest.com', etiqueta: 'Pinterest' },
+  { dominio: 'twitch.tv', etiqueta: 'Twitch' },
+  { dominio: 'soundcloud.com', etiqueta: 'SoundCloud' },
+  { dominio: 'last.fm', etiqueta: 'Last.fm' },
+  { dominio: 'slideshare.net', etiqueta: 'SlideShare' },
+  { dominio: 'spotify.com', etiqueta: 'Spotify' },
+  { dominio: 'linktr.ee', etiqueta: 'Linktree' },
+  { dominio: 'about.me', etiqueta: 'About.me' },
+  { dominio: 'beblue.com', etiqueta: 'BeBlue' },
+  { dominio: 'researchgate.net', etiqueta: 'ResearchGate' },
+  { dominio: 'orcid.org', etiqueta: 'ORCID' }
+];
+
+// ¿La consulta parece el nombre de una persona? Dos a cuatro palabras,
+// todas alphabéticas, capitalizadas. Si tiene dígitos, o unidades (DNI, DNI
+// 36768847, "capital de Australia"), NO es una persona y no se barre.
+const PALABRA_PROPIA = /^[A-ZÁÉÍÓÚÑ][\p{L}\p{N}'-]+$/u;
+
+const PREFIJOS_BUSQUEDA = /^\s*(buscar|buscame|buscá|buscaren|buscar\s+a|quien\s+es|quién\s+es|informacion\s+sobre|acerca\s+de|datos\s+de|contacto\s+de|perfil\s+de|de\s+quien\s+es)\s+/i;
+
+// Busca la primera tirada consecutiva de 2 a 4 nombres propios dentro de la
+// consulta. Así funciona con las formas que el modelo genera:
+//   "buscar a Cristian Sasinka en Cordoba Argentina" -> "Cristian Sasinka"
+//   "quién es Juan Perez Lopez"                      -> "Juan Perez Lopez"
+//   "capital de Australia"                          -> "Australia" (1, no sirve)
+//   "DNI 36768847 titular"                          -> tiene dígitos, no aplica
+export function extraerNombre(consulta) {
+  const limpio = String(consulta || '')
+    .trim()
+    .replace(/[?.!]+$/, '')
+    .replace(PREFIJOS_BUSQUEDA, '');
+
+  if (/\d/.test(limpio)) return null;
+
+  const palabras = limpio.split(/\s+/).filter(Boolean);
+  const maximo = Math.min(palabras.length, 4);
+
+  for (let largo = maximo; largo >= 2; largo--) {
+    for (let i = 0; i + largo <= palabras.length; i++) {
+      const trozo = palabras.slice(i, i + largo);
+      if (trozo.every(p => PALABRA_PROPIA.test(p))) return trozo.join(' ');
+    }
+  }
+  return null;
+}
+
+export function esConsultaDePersona(consulta) {
+  return extraerNombre(consulta) !== null;
+}
+
+// Limpia el nombre que devuelve el agente: saca los verbos que agrega y deja
+// sólo las palabras del nombre, con las mayúsculas originales para las comillas.
+export function normalizarNombreParaBusqueda(consulta) {
+  return extraerNombre(consulta) || String(consulta || '').trim().replace(/[?.!]+$/, '');
+}
+
+// Arma la consulta con site: y comillas exactas.
+export function consultaPorSitio(nombre, dominio) {
+  return `site:${dominio} "${nombre}"`;
+}
+
+// Bing NO siempre respeta el operador site:. A veces devuelve páginas de otro
+// sitio y las etiqueta como si fueran del que le pedimos. Por eso, después de
+// filtrar por relevancia, se exige que la URL realmente pertenezca al dominio
+// consultado. Si no, se descarta. Sin esto el agente reportaría "encontrado en
+// GitHub" un link de Wikipedia.
+export function hostCoincide(url, dominio) {
+  try {
+    const host = new URL(String(url).trim()).hostname.toLowerCase();
+    const d = String(dominio).toLowerCase().replace(/^www\./, '');
+    const h = host.replace(/^www\./, '');
+    return h === d || h.endsWith(`.${d}`);
+  } catch {
+    return false;
+  }
+}
+
+// Ejecuta N consultas a la vez, en lotes, para no saturar.
+async function enLotes(items, tamanoLote, tarea) {
+  const salida = [];
+  for (let i = 0; i < items.length; i += tamanoLote) {
+    const lote = items.slice(i, i + tamanoLote);
+    const r = await Promise.all(lote.map(t => tarea(t)));
+    salida.push(...r);
+  }
+  return salida;
+}
+
+/**
+ * Barre plataformas buscando el nombre exacto de una persona.
+ * Devuelve sólo los resultados que realmente mencionan el nombre.
+ */
+export async function buscarPorSitios(nombre, { limite = 5, sitios = SITIOS_PERFIL, porLote = 4 } = {}) {
+  const encontrados = [];
+  const vacios = [];
+
+  const resultados = await enLotes(sitios, porLote, async (sitio) => {
+    const consulta = consultaPorSitio(nombre, sitio.dominio);
+    try {
+      const html = await curl(`"https://www.bing.com/search?q=${encodeURIComponent(consulta)}&count=6&setlang=es"`);
+      const crudos = parsearBing(html, 6);
+      // Dos filtros: que mencionen el nombre Y que la URL sea del sitio pedido.
+      const relevantes = filtrarPorRelevancia(crudos, nombre, limite)
+        .filter(r => hostCoincide(r.url, sitio.dominio));
+      return { sitio, relevantes };
+    } catch {
+      return { sitio, relevantes: [] };
+    }
+  });
+
+  for (const { sitio, relevantes } of resultados) {
+    if (relevantes.length === 0) { vacios.push(sitio.etiqueta); continue; }
+    for (const r of relevantes.slice(0, 2)) {
+      if (encontrados.length >= limite) break;
+      // Deduplicar por URL (el mismo perfil aparece en varias plataformas).
+      if (encontrados.some(e => e.url === r.url)) continue;
+      encontrados.push({ ...r, plataforma: sitio.etiqueta });
+    }
+  }
+
+  return { encontrados, vacios };
+}
+
+// Texto final de la búsqueda de personas. Dice explícitamente qué se buscó y
+// qué plataformas no devuelieron nada, para que el modelo no rellene.
+export function formatearPersona(nombre, { encontrados, vacios }) {
+  if (encontrados.length === 0) {
+    return `Búsqueda de perfil público para "${nombre}" (${SITIOS_PERFIL.length} plataformas, con comillas exactas y filtro de relevancia).
+Resultado: NINGÚN perfil público de "${nombre}" menciona ese nombre completo.
+Plataformas sin coincidencia: ${vacios.join(', ')}.
+
+Sobre una persona sin perfil público indexado no hay nada que informar.
+Decí eso textualmente. NO completes con datos parecidos (nombres similares,
+personas con el mismo nombre y otro apellido) ni inventes nada.
+Si el usuario tiene un usuario (@handle), un email o un dominio, pediles eso:
+con eso sí se puede buscar.`;
+  }
+
+  const lineas = encontrados.map((r, i) => {
+    const parts = [`${i + 1}. [${r.plataforma}] ${r.titulo}`];
+    if (r.url) parts.push(`   URL: ${r.url}`);
+    if (r.dominio) parts.push(`   Sitio: ${r.dominio}`);
+    if (r.snippet) parts.push(`   ${r.snippet}`);
+    return parts.join('\n');
+  });
+
+  return `Perfiles públicos encontrados para "${nombre}" (${encontrados.length} de ${SITIOS_PERFIL.length} plataformas, filtrado por coincidencia del nombre exacto):
+Plataformas con coincidencia: ${[...new Set(encontrados.map(e => e.plataforma))].join(', ')}
+Plataformas sin coincidencia: ${vacios.join(', ')}
+
+${lineas.join('\n\n')}`;
+}
+
+export function formatear(consulta, resultados, motor) {
   if (resultados.length === 0) {
     return `Sin resultados para "${consulta}" (motor: ${motor}). Probá reformular la consulta.`;
   }
@@ -121,20 +374,47 @@ function formatear(consulta, resultados, motor) {
 // ---------- Búsqueda web general ----------
 export async function buscarWeb({ consulta, limite = 6 }) {
   if (!consulta) throw new Error('Falta el parámetro "consulta"');
+
+  // Si la consulta es el nombre de una persona, no alcanza con la búsqueda
+  // general: hay que interrogar cada plataforma con site: y comillas exactas.
+  if (esConsultaDePersona(consulta)) {
+    const nombre = normalizarNombreParaBusqueda(consulta);
+    try {
+      const { encontrados, vacios } = await buscarPorSitios(nombre, { limite: 8 });
+      return formatearPersona(nombre, { encontrados, vacios });
+    } catch (err) {
+      return `No se pudo completar la búsqueda de perfil público para "${nombre}" (${err.message}).
+Se buscó en ${SITIOS_PERFIL.length} plataformas con comillas exactas, pero falló la consulta.`;
+    }
+  }
+
   const q = encodeURIComponent(consulta);
 
   // 1) Bing ( scrape del HTML ya parseado )
   try {
-    const html = await curl(`"https://www.bing.com/search?q=${q}&count=${limite}&setlang=es"`);
-    const resultados = parsearBing(html, limite);
-    if (resultados.length > 0) return formatear(consulta, resultados, 'bing');
-    throw new Error('Bing no devolvió resultados parseables');
+    const html = await curl(`"https://www.bing.com/search?q=${q}&count=${limite * 4}&setlang=es"`);
+    const crudos = parsearBing(html, limite);
+    if (crudos.length === 0) throw new Error('Bing no devolvió resultados parseables');
+
+    const relevantes = filtrarPorRelevancia(crudos, consulta, limite);
+
+    // Ningún resultado menciona realmente lo que se buscó. Se dice eso en
+    // lugar de devolver páginas que no tienen nada que ver: así el modelo no
+    // puede inventar nada a partir de resultados falsos.
+    if (relevantes.length === 0) {
+      return `Bing devolvió ${crudos.length} páginas, pero NINGUNA menciona "${consulta}" (se buscaron las palabras: ${palabrasClave(consulta).join(', ')}).
+Ninguno de esos resultados es sobre lo que preguntaste, así que no hay información para dar.
+Si la persona o el tema no está publicado en internet, no hay forma de encontrarlo acá.`;
+    }
+
+    return formatear(consulta, relevantes, 'bing');
   } catch (errBing) {
-    // 2) Wikipedia como fallback
+    // 2) Wikipedia como fallback (solo para el término principal)
     try {
-      const json = JSON.parse(await curl(`"https://es.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(consulta)}"`));
+      const termino = palabrasClave(consulta)[0] || consulta;
+      const json = JSON.parse(await curl(`"https://es.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(termino)}"`));
       if (json.extract) {
-        return `Resumen de Wikipedia sobre "${consulta}":\n\n${json.extract}\n\nFuente: ${json.content_urls?.desktop?.page || ''}`;
+        return `Resumen de Wikipedia sobre "${termino}" (única coincidencia parcial de "${consulta}"):\n\n${json.extract}\n\nFuente: ${json.content_urls?.desktop?.page || ''}`;
       }
     } catch { /* cae al último recurso */ }
 
