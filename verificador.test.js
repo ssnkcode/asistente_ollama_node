@@ -9,7 +9,8 @@ import {
   repoVerificado,
   extraerCandidatos,
   fuentes,
-  urlsConocidas
+  urlsConocidas,
+  PHRASES_BLOQUEADAS
 } from './verificador.js';
 
 describe('verificador - protocolo de citas', () => {
@@ -73,11 +74,11 @@ describe('verificador - texto libre', () => {
     assert.equal(r.ok, true);
   });
 
-  test('bloquea frase evasiva', () => {
+  test('ya NO bloquea frases evasivas (a pedido del usuario)', () => {
     registrarFuente('Resultados de búsqueda');
     const r = verificarTexto('No puedo acceder a esa información');
-    assert.equal(r.ok, false);
-    assert(r.motivo.includes('Desvío'));
+    assert.equal(r.ok, true);
+    assert.equal(PHRASES_BLOQUEADAS.length, 0);
   });
 
   test('bloquea repetición de oraciones', () => {

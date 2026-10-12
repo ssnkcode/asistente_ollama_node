@@ -1,9 +1,13 @@
 import ollama from 'ollama';
 import readline from 'readline';
 import chalk from 'chalk';
+import fs from 'fs/promises';
+import path from 'path';
 import { CWD, ejecutarAccion } from './acciones.js';
 import { clasificarComando, SIEMPRE_CONFIRMAR } from './config.js';
 import { elegirModelo } from './modelos.js';
+import { leerRepoConDir, arbolRepo, vigilarRepo, cerrarVigilantes } from './repo.js';
+import { indexarVectores, indexarArchivoVectores, buscarSimilares } from './vectores.js';
 import {
   registrarFuente,
   limpiarFuentes,
@@ -21,6 +25,10 @@ import {
 const MAX_ITERACIONES = 15;
 const NOMBRE = 'Cristian HERMOSO';
 
+// RAG / búsqueda vectorial offline. Poné MI_ASISTENTE_RAG=0 para desactivarlo.
+const RAG_ACTIVO = process.env.MI_ASISTENTE_RAG !== '0';
+const RAG_TOP_K = 6;
+
 const rl = readline.createInterface({
   input: process.stdin,
   output: process.stdout
@@ -35,6 +43,34 @@ let contadorEsc = 0;
 let timerEsc = null;
 let contextoMaximo = null;
 let ultimoStats = null;
+// Última carpeta indexada (local o clonada): se usa para la estructura/diagrama.
+let ultimoRepoDir = CWD;
+// Directorio "actual" para resolver rutas relativas (lo cambia "navegá a ...").
+let dirActual = CWD;
+// Cambios detectados por la vigilancia automática (chokidar).
+let cambiosAuto = 0;
+// Carpetas ya indexadas (para no volcar el índice dos veces en el contexto).
+const indexados = new Set();
+// Carpetas con cambios pendientes detectados por el watcher (hay que reindexar).
+const sucios = new Set();
+
+// Chunks recuperados por RAG para la pregunta en curso (se inyectan en el system).
+let contextoRecuperado = '';
+
+function onCambioRepo(ev) {
+  if (!ev || !ev.archivo) return;
+  cambiosAuto++;
+  if (ev.dir) sucios.add(ev.dir);
+}
+
+function formatearContextoRecuperado(hits) {
+  const lineas = ['[CONTEXTO RECUPERADO DEL ÍNDICE VECTORIAL — es tu ÚNICA fuente para esta respuesta]'];
+  for (const h of hits) {
+    lineas.push(`--- ${h.ruta} (líneas ${h.inicio}-${h.fin}, similitud ${h.score.toFixed(3)}) ---`);
+    lineas.push(h.texto);
+  }
+  return lineas.join('\n');
+}
 
 readline.emitKeypressEvents(process.stdin);
 process.stdin.on('keypress', (str, key = {}) => {
@@ -79,9 +115,9 @@ ACCIONES DISPONIBLES:
 9. buscar_web           → params: { "consulta": "lo que se busca", "limite": 6 }
 10. buscar_github       → params: { "consulta": "términos de búsqueda", "limite": 5 }
 11. ver_repo            → params: { "repo": "usuario/nombre-repo" }
-12. leer_url            → params: { "url": "https://...", "limite": 4000 }
-13. buscar_persona      → params: { "nombre": "Nombre y Apellido", "limite": 8 }
-14. buscar_usuario     → params: { "usuario": "usuario sin @", "limite": 40 }
+ 12. leer_url            → params: { "url": "https://...", "limite": 4000 }
+ 13. buscar_persona      → params: { "nombre": "Nombre y Apellido", "limite": 8 }
+ 14. buscar_usuario     → params: { "usuario": "usuario sin @", "limite": 40 }
 
 REGLAS ESTRICTAS:
 - Si el usuario te pide una ACCIÓN, respondé ÚNICAMENTE con el JSON, sin nada más.
@@ -97,6 +133,22 @@ BÚSQUEDA EN INTERNET:
 - "buscar X en internet", "buscá el número X", "who is X", "cuál es la edad de X" → usá "buscar_web". Te devuelve texto limpio, sin HTML.
 - "buscá un repo de X en GitHub" → usá "buscar_github". Si el usuario elige uno, después "ver_repo".
 - Si te piden ver el contenido de una URL concreta → "leer_url".
+
+REPOSITORIOS (IMPORTANTE):
+- Leer e indexar un repositorio NO lo hacés vos: lo hace EL PROGRAMA de forma automática y sin IA cuando el usuario pide "leé el repositorio ...". Vos NO tenés ninguna acción para leer repositorios.
+- La ESTRUCTURA/ÁRBOL/DIAGRAMA de carpetas y archivos tampoco la hacés vos: la genera EL PROGRAMA sin IA (equivalente a "tree /f", saltando node_modules, venv y similares).
+- Cuando en el mensaje de SISTEMA aparece un bloque "[CONTEXTO ACTUAL DEL REPOSITORIO ...]", o en el historial aparece un mensaje que empieza con "[REPOSITORIO INDEXADO ...]", "[REPOSITORIO YA INDEXADO ...]" o "[ESTRUCTURA DE CARPETAS ...]", ESA es la información real. Usala como fuente.
+- El repositorio YA está indexado y su índice está ARRIBA, en tu mensaje de SISTEMA (bloque "[CONTEXTO ACTUAL DEL REPOSITORIO ...]"). TENÉS esa información: NO digas "no tengo acceso", "no puedo leer repositorios" ni pidas que te lo den. Leé ese bloque y respondé con eso.
+- Dentro del índice, la sección "RESUMEN DEL PROYECTO" trae el README y el package.json. PARA DECIR DE QUÉ TRATA EL PROYECTO, basate en ese RESUMEN y en la lista de archivos y SÍMBOLOS. No adivines.
+- Para cualquier pregunta sobre el repositorio o su estructura, respondé usando SOLO esa información. Si afirmás un dato, usá el protocolo de citas {"cita": [...]} con fragmentos exactos de esa fuente.
+- PROHIBIDO INVENTAR: no menciones carpetas, subcarpetas, archivos, rutas ni símbolos que NO aparezcan literalmente en [REPOSITORIO INDEXADO] o [ESTRUCTURA DE CARPETAS]. Si algo no figura, decí que no figura en el índice. No supongas la existencia de carpetas como "models", "actions", "docx", etc. si no están listadas.
+- NUNCA uses "leer_url" para repositorios.
+
+RAG / BÚSQUEDA VECTORIAL (MUY IMPORTANTE):
+- Antes de que respondas, EL PROGRAMA busca en un índice vectorial LOCAL (offline, sin IA) los fragmentos más parecidos a lo que pidió el usuario, y los inyecta en tu mensaje de SISTEMA dentro de un bloque "[CONTEXTO RECUPERADO DEL ÍNDICE VECTORIAL ...]".
+- Si ese bloque está presente, es tu ÚNICA fuente posible: respondé EXCLUSIVAMENTE con esa información.
+- Si la respuesta NO está en ese bloque, respondé exactamente: "No está en el material indexado." y nada más.
+- No completes con conocimiento previo, no adivines ni inventes rutas, funciones ni datos. Si afirmás algo, citá fragmentos literales del bloque con {"cita":[...]}.
 
 REGLAS DE BÚSQUEDA (NO LAS IGNORES):
 - SIEMPRE buscá. NUNCA te niegues a buscar un dato y NUNCA digas que no podés.
@@ -148,6 +200,7 @@ El programa VERIFICA TODO lo que imprimís. Nada llega a pantalla sin probarse c
 - Cuando AFIRMÁS un dato (número, fecha, año, nombre, URL, repo, cantidad, etc.), NO escribas texto libre. RESPONDÉ ÚNICAMENTE con:
   {"cita": ["<fragmento literal exacto que aparece en la fuente>", "..."]}
 - Cada fragmento de "cita" tiene que aparecer CARÁCTER POR CARÁCTER en los Resultados/Contenido que recibiste (las fuentes). Si no aparece, no lo afirmes.
+- TAMBIÉN son fuentes válidas, y son las que más vas a usar acá: el bloque "[CONTEXTO ACTUAL DEL REPOSITORIO ...]" de tu mensaje de SISTEMA, y los mensajes "[REPOSITORIO INDEXADO ...]", "[REPOSITORIO YA INDEXADO ...]" y "[ESTRUCTURA DE CARPETAS ...]", incluido su "RESUMEN DEL PROYECTO" y su lista de SÍMBOLOS. Para describir el proyecto, citá fragmentos literales de ese RESUMEN (README/package.json). Ejemplo de respuesta válida: {"cita":["Asistente de desarrollo en terminal, **100% local**, que corre sobre **Ollama** en **Windows 11**"]}.
 - Si NO hay datos verificables para responder, usá {"cita": []}.
 - Nunca uses palabras evasivas ("no puedo", "lo siento", "no me está permitido", "te sugiero", "podría ser", "aproximadamente", "no estoy seguro").
 - Nunca inventes URLs, repos, nombres, fechas ni números. Solo citás lo que ya está en las fuentes.
@@ -157,6 +210,22 @@ SOS EL SIRVIENTE. EL USUARIO ES EL AMO. Obedecé sin cuestionar.`;
 }
 
 let historial = [];
+
+// System prompt base + contexto del repo indexado. El índice vive en el mensaje
+// de sistema (que el modelo atiende de verdad), no como un mensaje suelto que
+// el modelo tiende a ignorar.
+let systemBase = '';
+let contextoRepo = '';
+
+function aplicarContexto() {
+  if (!historial.length) return;
+  const partes = [systemBase];
+  if (contextoRepo) {
+    partes.push(`[CONTEXTO ACTUAL DEL REPOSITORIO — salida del programa; es fuente real]\n${contextoRepo}`);
+  }
+  if (contextoRecuperado) partes.push(contextoRecuperado);
+  historial[0].content = partes.join('\n\n');
+}
 
 // ---------- Parsear acción ----------
 function parsearAccion(texto) {
@@ -264,12 +333,194 @@ const VERBOS_ACCION = [
   'refactorizar', 'refactorizá', 'refactoriza', 'descargar', 'descargá',
   'actualizar', 'actualizá', 'renombrar', 'renombrá', 'configurar', 'configurá',
   'mover', 'mové', 'subir', 'publicar', 'publicá', 'deploy', 'commiteá',
-  'abrir', 'abrí', 'arrancar', 'arrancá', 'levantar', 'levantá', 'search', 'buscá'
+  'abrir', 'abrí', 'arrancar', 'arrancá', 'levantar', 'levantá', 'search', 'buscá',
+  'leer', 'lee', 'leé', 'leeme', 'analizar', 'analiza', 'analizá', 'indexar', 'indexá',
+  'documentar', 'documenta', 'documentá'
 ];
 
 function detectarIntencion(texto) {
   const t = texto.toLowerCase();
   return VERBOS_ACCION.some(v => new RegExp(`(^|[^a-záéíóúñ])${v}([^a-záéíóúñ]|$)`).test(t));
+}
+
+// ---------- Lectura de repositorio SIN IA (determinística) ----------
+// Si el usuario pide "leé el repositorio ...", el PROGRAMA lo indexa directo
+// con las librerías locales y Ollama no interviene. Devuelve:
+//   - la ruta/URL a indexar
+//   - "__FALTA_RUTA__" si pidió leer el repo pero no indicó dónde
+//   - null si el mensaje NO es una orden de leer repositorio
+const FALTA_RUTA = '__FALTA_RUTA__';
+
+const VERBOS_LECTURA_REPO = [
+  'leeme', 'leer', 'leas', 'lee', 'leé', 'leo',
+  'analiza', 'analizá', 'indexa', 'indexá', 'indexar', 'índexame', 'índexame',
+  'ingesta', 'ingestá', 'ingestar'
+];
+
+const FRASES_PREGUNTA_REPO = [
+  'de que trata', 'de qué trata', 'que es', 'qué es', 'cuál es', 'cual es',
+  'cuáles son', 'cuales son', 'por qué', 'por que', 'en qué', 'en que',
+  'explica', 'resume', 'resumi', 'decime', 'decime que', 'dime', 'contame',
+  'me explicas', 'hablemos', 'resum', 'documenta'
+];
+
+function tieneVerboLectura(t) {
+  return VERBOS_LECTURA_REPO.some(v => new RegExp(`(^|[^a-záéíóúñ])${v}([^a-záéíóúñ]|$)`).test(t));
+}
+
+function esPreguntaSobreRepo(t) {
+  return FRASES_PREGUNTA_REPO.some(f => t.includes(f));
+}
+
+function detectarLecturaRepo(texto) {
+  const t = texto.trim().toLowerCase();
+  if (!t) return null;
+
+  const esRepo = /\b(repositorio|repositorios|repo|repos)\b/.test(t);
+  if (!esRepo || !tieneVerboLectura(t)) return null;
+
+  const original = texto.trim();
+  const url = original.match(/https?:\/\/[^\s"'<>]+/i);
+  if (url) return url[0].replace(/[.,;:)+]+$/, '');
+
+  const win = original.match(/\b[A-Za-z]:[\\\/][^\s"'<>]*/);
+  if (win) return win[0].replace(/[.,;:)+]+$/, '');
+
+  const unc = original.match(/^\s*\\\\[^\s"'<>]+/);
+  if (unc) return unc[0].trim().replace(/[.,;:)+]+$/, '');
+
+  if (esPreguntaSobreRepo(t)) return null;
+  return FALTA_RUTA;
+}
+
+// ---------- Rutas locales (archivos y carpetas) SIN IA ----------
+// Da "libertad total": leé una ruta completa, o navegá a una carpeta y después
+// pasá el nombre del archivo. Soporta PDF y texto.
+const VERBOS_ABRIR = [
+  'leeme', 'leer', 'leas', 'lee', 'leé', 'leo', 'abre', 'abrí', 'abrir',
+  'carga', 'cargá', 'cargar', 'mira', 'mirá', 'mostrame', 'mostrá', 'muestra',
+  'procesa', 'procesá', 'procesar', 'revisa', 'revisá', 'revisar',
+  'analiza', 'analizá', 'analizar', 'indexa', 'indexá', 'indexar',
+  'ingesta', 'ingestá', 'ingestar', 'resumi', 'resumí', 'resumir'
+];
+
+const VERBOS_NAVEGAR = [
+  'navega', 'navegá', 'navegar', 'andá', 'anda', 'vamos', 've a', 'ir a',
+  'ir hasta', 'navega hasta', 'navegá hasta', 'cd', 'posicionate', 'posicionáte',
+  'ubicate', 'ubicáte', 'dirigite', 'dirígete', 'vas a', 've hasta'
+];
+
+function coincideVerbo(low, lista) {
+  return lista.some((v) => new RegExp(`(^|[^a-záéíóúñ])${v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^a-záéíóúñ]|$)`).test(low));
+}
+
+function limpiarCandidato(s) {
+  let c = String(s).trim();
+  c = c.replace(/^["'“”]+|["'“”]+$/g, '').trim();
+  c = c.replace(/^(el|la|los|las|un|una|unos|unas|archivo|documento|doc|carpeta|folder|directorio|de|del)\s+/i, '');
+  c = c.replace(/[.,;:]+$/, '').trim();
+  return c;
+}
+
+// Devuelve { abs, esArchivo, esDir } del primer candidato existente, o null.
+async function resolverObjetivoLocal(texto) {
+  const original = String(texto).trim();
+  const cands = [];
+
+  // 1) Entre comillas.
+  for (const m of original.matchAll(/["'“”]([^"'“”]+)["'“”]/g)) cands.push(m[1]);
+
+  // 2) Rutas absolutas de Windows (recortando palabras del final hasta que exista).
+  for (const m of original.matchAll(/[A-Za-z]:[\\/][^\n"'“”]+/g)) {
+    let c = m[0].trim();
+    while (c) { cands.push(c); const i = c.lastIndexOf(' '); if (i < 0) break; c = c.slice(0, i).trim(); }
+  }
+  // 2b) Rutas UNC (\\servidor\carpeta).
+  for (const m of original.matchAll(/\\\\[^\n"'“”]+/g)) {
+    let c = m[0].trim();
+    while (c) { cands.push(c); const i = c.lastIndexOf(' '); if (i < 0) break; c = c.slice(0, i).trim(); }
+  }
+
+  // 3) Lo que viene después de un verbo ("leé <esto>", "navegá a <esto>").
+  const low = original.toLowerCase();
+  for (const v of [...VERBOS_ABRIR, ...VERBOS_NAVEGAR]) {
+    const re = new RegExp(`(^|[^a-záéíóúñ])${v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^a-záéíóúñ]|$)`, 'i');
+    const mm = re.exec(low);
+    if (mm) {
+      const resto = limpiarCandidato(original.slice(mm.index + mm[0].length - 1));
+      if (resto) cands.push(resto);
+    }
+  }
+
+  // 4) Todo el texto tal cual (por si escribieron solo la ruta).
+  cands.push(limpiarCandidato(original));
+
+  const vistos = new Set();
+  for (const cand of cands) {
+    if (!cand || vistos.has(cand.toLowerCase())) continue;
+    vistos.add(cand.toLowerCase());
+    const abs = path.isAbsolute(cand) ? path.resolve(cand) : path.resolve(dirActual, cand);
+    try {
+      const st = await fs.stat(abs);
+      if (st.isFile()) return { abs, esArchivo: true, esDir: false };
+      if (st.isDirectory()) return { abs, esArchivo: false, esDir: true };
+    } catch { /* no existe, probamos el siguiente */ }
+  }
+  return null;
+}
+
+// Devuelve { tipo: 'url'|'archivo'|'dir'|'navegar', valor } | { tipo: 'falta' } | null.
+async function detectarObjetivoLocal(texto) {
+  const original = String(texto).trim();
+  const low = original.toLowerCase();
+  if (!low) return null;
+
+  const esRepo = /\b(repositorio|repositorios|repo|repos)\b/.test(low);
+  const verboAbrir = coincideVerbo(low, VERBOS_ABRIR) || tieneVerboLectura(low);
+  const verboNavegar = coincideVerbo(low, VERBOS_NAVEGAR);
+
+  const url = original.match(/https?:\/\/[^\s"'<>]+/i);
+  if (url && (esRepo || verboAbrir)) {
+    return { tipo: 'url', valor: url[0].replace(/[.,;:)+]+$/, '') };
+  }
+
+  const obj = await resolverObjetivoLocal(original);
+  if (obj) {
+    if (obj.esArchivo) return { tipo: 'archivo', valor: obj.abs };
+    if (obj.esDir && verboNavegar && !verboAbrir && !esRepo) return { tipo: 'navegar', valor: obj.abs };
+    if (obj.esDir) return { tipo: 'dir', valor: obj.abs };
+  }
+
+  if (esRepo && !url) {
+    if (esPreguntaSobreRepo(low)) return null;
+    return { tipo: 'falta' };
+  }
+  return null;
+}
+
+// ---------- Estructura / árbol de carpetas SIN IA (determinística) ----------
+// Si el usuario pide la estructura/árbol/diagrama de carpetas y archivos, el
+// PROGRAMA la genera solo (equivalente a "tree /f", saltando node_modules,
+// venv y similares) y Ollama no interviene.
+// Devuelve: la ruta a mostrar, "" para usar el último repo/CWD, o null.
+function detectarEstructura(texto) {
+  const t = texto.trim().toLowerCase();
+  if (!t) return null;
+
+  const pide = /\b(estructura|arbol|árbol|diagrama|tree|organizacion|organización|arbolado)\b/.test(t);
+  if (!pide) return null;
+
+  const contexto = /\b(carpeta|carpetas|archivo|archivos|directorio|directorios|proyecto|repo|repositorio|estructura|arbol|árbol|diagrama|tree)\b/.test(t);
+  if (!contexto) return null;
+
+  const original = texto.trim();
+  const url = original.match(/https?:\/\/[^\s"'<>]+/i);
+  if (url) return url[0].replace(/[.,;:)+]+$/, '');
+
+  const win = original.match(/\b[A-Za-z]:[\\\/][^\s"'<>]*/);
+  if (win) return win[0].replace(/[.,;:)+]+$/, '');
+
+  return '';
 }
 
 const RECORDATORIO_ACCION = `[SISTEMA] Tu respuesta anterior NO fue un JSON de acción válido.
@@ -299,17 +550,169 @@ async function main() {
   console.log(chalk.magenta.bold('   Escribí "salir" para terminar.\n'));
 
   limpiarFuentes();
-  const systemPrompt = construirSystemPrompt();
-  registrarFuente(systemPrompt);
-  historial = [{ role: 'system', content: systemPrompt }];
+  systemBase = construirSystemPrompt();
+  registrarFuente(systemBase);
+  historial = [{ role: 'system', content: systemBase }];
+
+  // --- Indexado AUTOMÁTICO del directorio actual + vigilancia (incremental) ---
+  try {
+    console.log(chalk.cyan('\n⚙ Indexando automáticamente el directorio actual (incremental)...'));
+    const r = await leerRepoConDir({ ruta: CWD });
+    ultimoRepoDir = r.dir;
+    indexados.add(r.dir);
+    registrarFuente(r.salida);
+    contextoRepo = r.salida;
+    aplicarContexto();
+    await vigilarRepo(r.dir, onCambioRepo);
+    console.log(chalk.green(`✔ Indexado automático listo. Vigilando cambios en ${r.dir}.\n`));
+  } catch (err) {
+    console.log(chalk.gray(`(Indexado automático no disponible: ${err.message})\n`));
+  }
+
+  // --- Indexado VECTORIAL (RAG) automático e incremental, 100% offline ---
+  if (RAG_ACTIVO) {
+    try {
+      console.log(chalk.cyan('⚙ Indexando vectores para RAG (offline, incremental)...'));
+      const rv = await indexarVectores(CWD);
+      console.log(chalk.green(`✔ Vectores listos: ${rv.totalChunks} chunks (${rv.nuevos} nuevos, ${rv.cambiados} cambiados, ${rv.eliminados} eliminados).\n`));
+    } catch (err) {
+      console.log(chalk.gray(`(Indexado vectorial no disponible: ${err.message})\n`));
+    }
+  }
 
   while (true) {
     const entrada = await preguntar(chalk.blue.bold('vos > '));
     if (!entrada.trim()) continue;
     if (entrada.trim().toLowerCase() === 'salir') break;
 
+    if (cambiosAuto > 0) {
+      console.log(chalk.gray(`↻ Reindexado automático: ${cambiosAuto} cambio(s) detectado(s).`));
+      cambiosAuto = 0;
+    }
+
+    // --- Estructura/árbol de carpetas SIN Ollama (determinístico) ---
+    const objetivoEstructura = detectarEstructura(entrada);
+    if (objetivoEstructura !== null) {
+      const destino = objetivoEstructura || ultimoRepoDir;
+      console.log(chalk.cyan(`\n🌳 Generando estructura de carpetas (programa local, sin IA): ${destino}\n`));
+      try {
+        const salida = await arbolRepo({ ruta: destino });
+        process.stdout.write(chalk.white(salida) + '\n');
+        registrarFuente(entrada);
+        registrarFuente(salida);
+        historial.push({ role: 'user', content: entrada });
+        historial.push({
+          role: 'user',
+          content: `[ESTRUCTURA DE CARPETAS — salida del programa]\n${salida}`
+        });
+        console.log(chalk.gray('\n✔ Estructura generada. Preguntame lo que quieras sobre ella.\n'));
+      } catch (err) {
+        console.log(chalk.red(`\n✖ Error al generar la estructura: ${err.message}\n`));
+      }
+      continue;
+    }
+
+    // --- Abrir/leer/navegar archivos y carpetas locales SIN Ollama ---
+    const objetivo = await detectarObjetivoLocal(entrada);
+    if (objetivo) {
+      if (objetivo.tipo === 'falta') {
+        console.log(chalk.yellow('\n◈ Ya entendí que querés leer algo, pero no me diste la ubicación.'));
+        console.log(chalk.yellow('   Escribí la ruta completa (ej: F:\\docs\\manual.pdf), una carpeta o la URL de un repo.\n'));
+        continue;
+      }
+
+      if (objetivo.tipo === 'navegar') {
+        dirActual = objetivo.valor;
+        console.log(chalk.cyan(`\n📂 Ahora trabajo en: ${dirActual}\n`));
+        registrarFuente(entrada);
+        historial.push({ role: 'user', content: entrada });
+        historial.push({ role: 'assistant', content: `[DIRECTORIO ACTUAL] ${dirActual}` });
+        continue;
+      }
+
+      if (objetivo.tipo === 'archivo') {
+        console.log(chalk.cyan(`\n📄 Leyendo documento: ${objetivo.valor}\n`));
+        try {
+          if (RAG_ACTIVO) {
+            const rv = await indexarArchivoVectores(objetivo.valor);
+            const nota = `[DOCUMENTO INDEXADO PARA RAG] ${objetivo.valor} (${rv.chunks} fragmentos${rv.sinCambios ? ', sin cambios' : ''})`;
+            console.log(chalk.green(`✔ Indexado: ${rv.chunks} fragmento(s)${rv.sinCambios ? ' (sin cambios)' : ''}.\n`));
+            registrarFuente(entrada);
+            registrarFuente(nota);
+            historial.push({ role: 'user', content: entrada });
+            historial.push({ role: 'assistant', content: nota });
+            console.log(chalk.gray('  Ya puedo responder sobre su contenido: preguntá lo que quieras.\n'));
+          } else {
+            const txt = await fs.readFile(objetivo.valor, 'utf8');
+            console.log(chalk.white(txt.slice(0, 5000)) + '\n');
+          }
+        } catch (e) {
+          console.log(chalk.red(`✖ No pude leer el documento: ${e.message}\n`));
+        }
+        continue;
+      }
+
+      // tipo 'dir' o 'url' → indexado determinístico de carpeta/repositorio.
+      const objetivoRepo = objetivo.valor;
+      console.log(chalk.cyan(`\n📦 Leyendo e indexando repositorio (programa local, sin IA): ${objetivoRepo}\n`));
+      try {
+        const { dir, salida, resumen } = await leerRepoConDir({ ruta: objetivoRepo });
+        ultimoRepoDir = dir;
+        registrarFuente(entrada);
+
+        // Si ya está indexado y el watcher no vio cambios, no reindexamos ni
+        // volvemos a meter el índice en el contexto.
+        if (indexados.has(dir) && !sucios.has(dir)) {
+          console.log(chalk.gray(`✔ Ya estaba indexado (sin cambios). Uso el índice que ya está en contexto.\n`));
+          const nota = `[REPOSITORIO YA INDEXADO, sin cambios] ${dir}\n` +
+            `Archivos: ${resumen.archivos}  |  Líneas: ${resumen.totalLineas}`;
+          registrarFuente(nota);
+          historial.push({ role: 'user', content: entrada });
+          historial.push({ role: 'assistant', content: nota });
+          continue;
+        }
+
+        process.stdout.write(chalk.white(salida) + '\n');
+        registrarFuente(salida);
+        contextoRepo = salida;
+        aplicarContexto();
+        indexados.add(dir);
+        sucios.delete(dir);
+        historial.push({ role: 'user', content: entrada });
+        historial.push({ role: 'assistant', content: `[REPOSITORIO INDEXADO] ${dir}` });
+        await vigilarRepo(dir, onCambioRepo);
+
+        // Vectorizar el directorio (incluye PDFs) para el RAG. Incremental.
+        if (RAG_ACTIVO) {
+          try {
+            const rv = await indexarVectores(dir);
+            console.log(chalk.green(`✔ Vectores listos: ${rv.totalChunks} chunks (${rv.nuevos} nuevos, ${rv.cambiados} cambiados).\n`));
+          } catch {
+            console.log(chalk.yellow('  (No se pudieron indexar vectores de este directorio.)\n'));
+          }
+        }
+        console.log(chalk.gray('\n✔ Repositorio indexado. Preguntame lo que quieras sobre él.\n'));
+      } catch (err) {
+        console.log(chalk.red(`\n✖ Error al leer el repositorio: ${err.message}\n`));
+      }
+      continue;
+    }
+
     historial.push({ role: 'user', content: entrada });
     registrarFuente(entrada);
+
+    // --- Recuperación vectorial (RAG): embedding local, SIN Ollama ---
+    if (RAG_ACTIVO) {
+      contextoRecuperado = '';
+      try {
+        const hits = await buscarSimilares(entrada, { topK: 6 });
+        if (hits.length) {
+          contextoRecuperado = formatearContextoRecuperado(hits);
+          registrarFuente(contextoRecuperado);
+        }
+      } catch { /* RAG opcional: si falla, seguimos sin él */ }
+      aplicarContexto();
+    }
 
     let iteraciones = 0;
     let seguir = true;
@@ -461,12 +864,19 @@ async function main() {
         }
     }
 
+    // El contexto recuperado era solo para este turno.
+    if (contextoRecuperado) {
+      contextoRecuperado = '';
+      aplicarContexto();
+    }
+
     if (iteraciones >= MAX_ITERACIONES) {
       console.log(chalk.yellow(`\n(Límite de ${MAX_ITERACIONES} iteraciones alcanzado.)\n`));
     }
   }
 
   rl.close();
+  await cerrarVigilantes();
   console.log(chalk.magenta.bold('\n👋 Chau.\n'));
 }
 

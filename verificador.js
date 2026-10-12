@@ -27,14 +27,10 @@ export const MIN_CITA = 4;
 
 // Frases evasivas que el modelo usaba para NO responder. El usuario pidió
 // que nunca divague ni se esquive, así que se bloquean como desvío.
-export const PHRASES_BLOQUEADAS = [
-  'no puedo', 'lo siento', 'no tengo acceso', 'no me esta permitido',
-  'no me está permitido', 'te sugiero que consultes', 'sugiero que consultes',
-  'queres que busque', 'querés que busque', 'puedo proceder',
-  'no puedo acceder', 'no tengo informacion', 'no tengo información',
-  'como modelo de lenguaje', 'como modelo de ia', 'no estoy seguro',
-  'no estoy seguro', 'podria ser', 'podría ser', 'aproximadamente'
-];
+// Frases evasivas/hedging. Se dejó VACÍA a pedido: el modelo puede usar
+// libremente "no puedo", "podría ser", "aproximadamente", etc. sin que el
+// verificador bloquee la respuesta por eso.
+export const PHRASES_BLOQUEADAS = [];
 
 // Palabras que aparecen en mayúscula por estructura (títulos de nuestras
 // propias secciones) y no son datos. Sin esta lista el gate bloquearía

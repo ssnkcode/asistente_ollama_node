@@ -4,6 +4,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { buscarWeb, buscarGithub, verRepo, leerUrl, buscarPorSitios, formatearPersona, extraerNombre, SITIOS_PERFIL } from './buscar.js';
 import { buscarPorUsuario, formatearSherlock, sherlockInstalado } from './sherlock.js';
+import { leerRepo } from './repo.js';
 
 const execAsync = promisify(exec);
 
@@ -141,6 +142,13 @@ export const acciones = {
     const stat = await fs.stat(abs);
     if (!stat.isDirectory()) throw new Error(`No es una carpeta: ${ruta}`);
     return `Ruta válida: ${abs} (usá esta ruta en los próximos comandos)`;
+  },
+
+  // Lee/indexa un repositorio completo. Acepta carpeta local (F:\...) o URL
+  // git (https://github.com/usuario/repo.git). Es SOLO LECTURA: lista archivos,
+  // extrae símbolos con tree-sitter y, opcionalmente, busca con ripgrep.
+  async leer_repo({ ruta, url, repo, buscar, maxArchivos, maxSimbolos }) {
+    return leerRepo({ ruta, url, repo, buscar, maxArchivos, maxSimbolos });
   },
 
   async arbol({ ruta = '.', profundidad = 3 }) {
