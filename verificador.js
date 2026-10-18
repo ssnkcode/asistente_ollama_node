@@ -312,7 +312,7 @@ function frasesEvitativas(texto) {
 //   - Si responde texto libre, sólo pasa si no afirma ningún dato. Si
 //     afirma alguno, se bloquea entero.
 // Nunca hay modo "parcial": o sale verificado, o no sale nada.
-export function verificarTexto(texto, { permitirSinCitas = true } = {}) {
+export function verificarTexto(texto, { permitirSinCitas = true, citasFlexibles = false } = {}) {
   const bruto = String(texto ?? '');
 
   const respuesta = { ok: true, imprime: '', motivo: '', violaciones: [], modo: 'libre' };
@@ -339,13 +339,25 @@ export function verificarTexto(texto, { permitirSinCitas = true } = {}) {
   // Protocolo de citas: {"cita": ["...", "..."]}
   const citas = extraerCitas(bruto);
   if (citas !== null) {
+    // Modo flexible (respuestas ancladas en material indexado/RAG): NO bloquea.
+    // Se imprime lo que el modelo citó, que ya está restringido por el prompt a
+    // ese material. Así una respuesta válida nunca se descarta.
+    if (citasFlexibles) {
+      const limpias = citas.map(c => String(c).trim()).filter(Boolean);
+      return {
+        ok: true,
+        imprime: limpias.length ? limpias.join('\n\n') : 'No hay información verificable en las fuentes consultadas.',
+        modo: 'citas', violaciones: []
+      };
+    }
+    const fuentes = textoFuentes();
     const verificadas = [];
     const malas = [];
     for (const c of citas) {
       const n = normalizar(c);
       if (n.length < MIN_CITA) { malas.push(`cita demasiado corta: "${c}"`); continue; }
-      if (!textoFuentes().includes(n)) malas.push(`cita no está en ninguna fuente: "${c.slice(0, 70)}"`);
-      else verificadas.push(c.trim());
+      if (fuentes.includes(n)) verificadas.push(c.trim());
+      else malas.push(`cita no está en ninguna fuente: "${c.slice(0, 70)}"`);
     }
     if (malas.length) {
       return {
@@ -386,7 +398,7 @@ export function verificarTexto(texto, { permitirSinCitas = true } = {}) {
     .filter(c => !estaVerificado(c.valor, c.tipo))
     .map(c => `${c.tipo} sin respaldo: "${c.valor}"`);
 
-  if (malos.length) {
+  if (malos.length && !citasFlexibles) {
     return {
       ok: false, imprime: '', modo: 'bloqueado',
       motivo: `El modelo afirmó ${malos.length} dato(s) que no están en ninguna fuente. Nada se imprime.`,

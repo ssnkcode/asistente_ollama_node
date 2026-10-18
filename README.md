@@ -4,7 +4,7 @@ Asistente de desarrollo en terminal, **100% local**, que corre sobre **Ollama** 
 No hay servidores, ni APIs de pago, ni cuentas: el modelo se ejecuta en tu propia máquina y el
 agente tiene acceso directo a tu sistema de archivos, a `cmd.exe`, a internet y a GitHub.
 
-La persona del asistente es **"Cristian"** (constante `NOMBRE` en `index.js`).
+La persona del asistente es **"Cristian HERMOSO"** (constante `NOMBRE` en `index.js`).
 
 ---
 
@@ -36,6 +36,7 @@ La persona del asistente es **"Cristian"** (constante `NOMBRE` en `index.js`).
 | [Ollama](https://ollama.com) | instalado y **corriendo** en background |
 | GitHub CLI (`gh`) | solo para `buscar_github`, `ver_repo` y lectura de repos; requiere `gh auth login` |
 | `curl.exe` | incluido en Windows 10/11 de fábrica; usado para todo el scraping web |
+| [Sherlock](https://github.com/sherlock-project/sherlock) | opcional, solo para `buscar_usuario`; `pipx install sherlock-project` |
 
 No hay variables de entorno ni archivos `.env`: toda la configuración está en el código.
 
@@ -59,9 +60,15 @@ npm install
 npm start
 ```
 
-`npm start` es simplemente `node index.js`.
+`npm start` es simplemente `node index.js`. Los tests (con el runner nativo de Node) corren con:
 
-> No hay script de tests (`npm test` está deliberadamente sin implementar: devuelve error).
+```cmd
+npm test
+```
+
+> El módulo `tree-sitter` compila binarios nativos al instalar; `package.json` autoriza sus
+> scripts con `allowScripts`. La primera vez que se usa el RAG se descarga el modelo de embeddings
+> (`Xenova/all-MiniLM-L6-v2`) a `.cache/modelos` y después corre 100% offline.
 
 ---
 
@@ -88,13 +95,17 @@ válida, vuelve a preguntar (no elige por vos).
 Luego quedás en un REPL:
 
 ```
-🤖 Cristian — Asistente IA local (Windows 11)
+🤖 Cristian HERMOSO — Asistente IA local (Windows 11)
    Modelo: qwen2.5-coder:7b
    Directorio: F:\upc\mi-asistente
+   Contexto estimado: 32768 tokens
    Escribí "salir" para terminar.
 
 vos > creame un archivo hola.js que imprima hola
 ```
+
+Al arrancar también se avisa que nada se indexa solo: la lectura de repos, archivos y carpetas
+se pide explícitamente ("leé &lt;ruta&gt;", "analizá &lt;repo&gt;", "de qué trata &lt;archivo&gt;").
 
 ### Controles
 
@@ -120,17 +131,41 @@ vos > leé https://es.wikipedia.org/wiki/Node.js
 
 ## Arquitectura del proyecto
 
-Cinco módulos ESM planos, sin build, sin framework, sin transpilador. Node los carga nativamente.
+Módulos ESM planos, sin build, sin framework, sin transpilador. Node los carga nativamente.
 
 ```
 mi-asistente/
-├── package.json      # ESM ("type": "module"), deps chalk + ollama
-├── index.js          # 360 líneas - REPL, system prompt, loop de acciones, confirmaciones
-├── acciones.js       # 157 líneas - implementación de las 12 acciones (archivos + shell)
-├── buscar.js         # 407 líneas - scraping de Bing, Wikipedia y GitHub CLI
-├── config.js         # 109 líneas - clasificación de comandos (seguro/peligroso/prohibido)
-└── modelos.js         # 72 líneas - detección y selección de modelo de Ollama
+├── package.json         # ESM ("type": "module"), deps + scripts start/test
+├── index.js             # REPL, system prompt, loop de acciones, confirmaciones, RAG
+├── acciones.js          # implementación de las acciones (archivos + shell)
+├── buscar.js            # scraping de Bing, Wikipedia, GitHub CLI y búsqueda de personas
+├── config.js            # clasificación de comandos (seguro/peligroso/prohibido)
+├── modelos.js           # detección y selección de modelo de Ollama
+├── repo.js              # indexación de repositorios (tree-sitter, ripgrep, chokidar)
+├── vectores.js          # RAG local: embeddings (@xenova/transformers) + vectra
+├── sherlock.js          # búsqueda de @usuario en ~400 plataformas (Sherlock)
+├── tokens.js            # conteo de tokens vía API de Ollama
+├── verificador.js       # gate de veracidad (citas obligatorias, fail-closed)
+├── verificador.test.js  # tests del verificador (node --test)
+├── sherlock.test.js     # tests del parser de Sherlock
+├── tokens.test.js       # tests de cálculo de tokens
+└── buscar-personas.test.js  # tests de la búsqueda de perfiles
 ```
+
+### Lectura de repositorios SIN IA
+
+Cuando el usuario pide "leé el repositorio ...", `index.js` detecta la orden y el **programa**
+(o sea `repo.js`, sin intervención del modelo) indexa la carpeta local o clona la URL git a
+`.repos/`, extrae archivos y símbolos (tree-sitter), y volca el índice al historial. La
+vigilancia con `chokidar` mantiene el índice al día; el indexado es incremental (hash por
+archivo en `.cache/`).
+
+### RAG local (búsqueda vectorial)
+
+`vectores.js` indexa los archivos del proyecto (texto y PDF, vía `pdf-parse`) en chunks y los
+embebe offline con `Xenova/all-MiniLM-L6-v2` (`@xenova/transformers` + `vectra`). En cada
+pregunta se recuperan los chunks más similares y se inyectan en el system prompt como única
+fuente permitida. Se desactiva con `MI_ASISTENTE_RAG=0`.
 
 ### Flujo de datos
 
@@ -191,9 +226,14 @@ Formato exacto esperado:
 | 10 | `buscar_github` | `{ "consulta": "...", "limite": 5 }` | Busca repositorios vía `gh search repos` |
 | 11 | `ver_repo` | `{ "repo": "usuario/nombre-repo" }` | Ficha de un repo: estrellas, lenguaje, licencia, último push, URL de clonado |
 | 12 | `leer_url` | `{ "url": "https://...", "limite": 4000 }` | Devuelve el texto limpio de una página (los repos de GitHub van por API) |
+| 13 | `buscar_persona` | `{ "nombre": "Nombre y Apellido", "limite": 8 }` | Barrido de perfiles públicos: interroga plataformas con `site:` y comillas exactas |
+| 14 | `buscar_usuario` | `{ "usuario": "usuario sin @", "limite": 40 }` | Busca un @usuario en ~400 plataformas con **Sherlock** (tarda 30-90 s; requiere `pipx install sherlock-project`) |
+| 15 | `leer_repo` | `{ "ruta" \| "url": "..." }` | Indexa un repo local o una URL git (clona a `.repos/`). Solo lectura |
 
 Una acción por respuesta. El bucle interno permite encadenar hasta **15 acciones** por turno (por
-ejemplo `leer_archivo` → `refactorizar_archivo` → `ejecutar_comando`).
+ejemplo `leer_archivo` → `refactorizar_archivo` → `ejecutar_comando`). Nota: la lectura de
+repositorios que el usuario pide en lenguaje natural ("leé el repo ...") la intercepta el programa
+antes de llegar al modelo (ver [Arquitectura del proyecto](#arquitectura-del-proyecto)).
 
 ---
 
@@ -222,6 +262,15 @@ GitHub exige que aparezcan **todas** las palabras, así que una consulta larga d
 - `puntuar()` **reordena por relevancia real** a la consulta, no solo por estrellas: cada palabra
   clave aporta +4 si aparece en el nombre, +2 en la descripción, +1 en el lenguaje, y las estrellas
   solo se suman como desempate (`puntos * 1000 + estrellas`).
+
+### `buscar_persona` / `buscar_usuario`
+
+- **`buscar_persona`** (`buscar.js` → `buscarPorSitios`): barrido de perfiles públicos de una
+  persona (nombre y apellido). Interroga cada plataforma de `SITIOS_PERFIL` con `site:` y comillas
+  exactas vía Bing, y descarta los resultados que no mencionen el nombre completo
+  (`hostCoincide` + presencia del nombre en el snippet).
+- **`buscar_usuario`** (`sherlock.js`): dado un @usuario, corre **Sherlock** (~400 plataformas)
+  y parsea su stdout (`[+] Plataforma: url`). Tarda entre 30 y 90 s. Requiere Sherlock instalado.
 
 ### `leer_url`
 
@@ -306,17 +355,20 @@ El asistente muestra, después de cada respuesta, cuántos tokens se usaron y cu
 
 ### System prompt
 
-`construirSystemPrompt()` (`index.js:46`) define la personalidad, el formato JSON obligatorio, las
-12 acciones con sus parámetros, las reglas de refactorizado, las de búsqueda, el **Protocolo de Veracidad** (obligatorio con `{"cita": [...]}`) y varios ejemplos. También fuerza explícitamente al modelo a **no negarse a buscar** y a **no inventar datos**.
+`construirSystemPrompt()` (`index.js:108`) define la personalidad, el formato JSON obligatorio, las
+acciones con sus parámetros, las reglas de refactorizado, las de búsqueda, el **Protocolo de
+Veracidad** (obligatorio con `{"cita": [...]}`), las reglas de RAG/repositorios y varios
+ejemplos. También fuerza explícitamente al modelo a **no negarse a buscar** y a **no inventar
+datos**.
 
 ---
 
 ## Flujo de una acción
 
 1. El modelo responde con un JSON.
-2. `parsearAccion()` (`index.js:128`) busca el primer `{`, hace balanceo de llaves y valida que
+2. `parsearAccion()` (`index.js:239`) busca el primer `{`, hace balanceo de llaves y valida que
    existan las claves `accion` y `params`. Es tolerante: acepta JSON rodeado de texto o markdown.
-3. `confirmarYEjecutar()` (`index.js:153`) clasifica el comando si es `ejecutar_comando`:
+3. `confirmarYEjecutar()` (`index.js:264`) clasifica el comando si es `ejecutar_comando`:
    - `prohibido` → se imprime en rojo y **no se ejecuta**.
    - `seguro` + `SIEMPRE_CONFIRMAR=false` → se ejecuta directo.
    - cualquier otra acción (leer, escribir, borrar, buscar...) → **siempre** pide confirmación.
@@ -336,39 +388,51 @@ No hay archivo de configuración externo. Los puntos de ajuste son constantes en
 
 | Qué | Dónde | Actual |
 |---|---|---|
-| Nombre/persona del asistente | `index.js` → `NOMBRE` | `Cristian` |
+| Nombre/persona del asistente | `index.js` → `NOMBRE` | `Cristian HERMOSO` |
 | Iteraciones por turno | `index.js` → `MAX_ITERACIONES` | `15` |
 | Reintentos para obtener JSON | `index.js` → `MAX_INTENTOS_ACCION` | `3` |
 | Verbos que disparan el modo "acción" | `index.js` → `VERBOS_ACCION` | ~70 formas (voseo rioplatense) |
+| RAG (búsqueda vectorial) | `index.js` → `RAG_ACTIVO` | activo (`MI_ASISTENTE_RAG=0` lo desactiva) |
+| Chunks RAG recuperados por pregunta | `index.js` → `RAG_TOP_K` | `6` |
 | Límite de líneas por escritura | `acciones.js` → `LIMITE_LINEAS` | `200` |
 | Buffer máx. de `exec` | `acciones.js` | 20 MB |
 | Confirmar siempre los seguros | `config.js` → `SIEMPRE_CONFIRMAR` | `false` |
 | Prompt del sistema | `index.js` → `construirSystemPrompt()` | ver archivo |
 | User-Agent / idioma de scraping | `buscar.js` → `UA` y header `Accept-Language` | Chrome 120, `es-AR` |
 | Timeout de `curl` | `buscar.js` | 25 s |
+| Modelo de embeddings | `vectores.js` → `MODELO` | `Xenova/all-MiniLM-L6-v2` (384 dims) |
 
 ### Detección de intención
 
-`detectarIntencion()` (`index.js:236`) busca verbos de acción en el mensaje con un regex que exige
+`detectarIntencion()` (`index.js:349`) busca verbos de acción en el mensaje con un regex que exige
 frontera de palabra (incluye tildes y `ñ`). Si encuentra uno pero el modelo contesta en texto plano,
 se le repregunta hasta 3 veces con `RECORDATORIO_ACCION`. Es una garantía determinística: no depende
-de que el modelo "se porte bien".
+de que el modelo "se porte bien". Además, las órdenes de leer repositorios, archivos y carpetas se
+interceptan **antes** de llegar al modelo y se resuelven con código determinístico (`repo.js`,
+lectura local, `navegá a ...`).
 
 ---
 
 ## Dependencias
 
-Solo dos, ambas deliberadamente mínimas:
-
 | Paquete | Versión | Para qué |
 |---|---|---|
 | [`ollama`](https://www.npmjs.com/package/ollama) | `^0.6.4` | Cliente HTTP + streaming de `chat()` y `abort()` |
 | [`chalk`](https://www.npmjs.com/package/chalk) | `^6.0.1` | Colores en terminal (ESM puro, exige Node >= 22) |
+| [`@xenova/transformers`](https://www.npmjs.com/package/@xenova/transformers) | `^2.17.2` | Embeddings locales para el RAG (`all-MiniLM-L6-v2`) |
+| [`vectra`](https://www.npmjs.com/package/vectra) | `^0.15.0` | Vector store local (índice en `.cache/vectores`) |
+| [`tinyglobby`](https://www.npmjs.com/package/tinyglobby) | `^0.2.17` | Glob de archivos para indexar repos y vectores |
+| [`ignore`](https://www.npmjs.com/package/ignore) | `^7.0.12` | Respeta los `.gitignore` al indexar |
+| [`tree-sitter`](https://www.npmjs.com/package/tree-sitter) + [`tree-sitter-javascript`](https://www.npmjs.com/package/tree-sitter-javascript) | `^0.25.x` | Extracción de símbolos (funciones, clases...) en la indexación de repos |
+| [`@vscode/ripgrep`](https://www.npmjs.com/package/@vscode/ripgrep) | `^1.18.0` | Búsqueda de texto en repos indexados |
+| [`chokidar`](https://www.npmjs.com/package/chokidar) | `^5.0.0` | Vigilancia de cambios para reindexado incremental |
+| [`pdf-parse`](https://www.npmjs.com/package/pdf-parse) | `^2.4.5` | Extracción de texto de PDFs para el RAG |
 
 `ollama` arrastra `whatwg-fetch@^3.6.20` como dependencia transitiva.
 
 Todo lo demás es biblioteca estándar de Node (`child_process`, `fs/promises`, `path`, `readline`,
-`util`) o binarios del sistema (`curl.exe`, `gh`).
+`util`, `crypto`) o binarios del sistema (`curl.exe`, `gh`, y `sherlock` opcional para
+`buscar_usuario`).
 
 ---
 
@@ -393,7 +457,9 @@ Todo lo demás es biblioteca estándar de Node (`child_process`, `fs/promises`, 
   (`b_algo`, `b_lineclamp`, `b_caption`), la búsqueda web cae al fallback de Wikipedia.
 - **Páginas con JavaScript no se leen.** Sin navegador headless, el contenido generado en el cliente
   no existe en el HTML descargado. El asistente lo detecta y avisa, pero no lo resuelve.
-- **Sin tests.** `npm test` no está implementado.
+- **Tests mínimos.** `npm test` corre `node --test` sobre los archivos `*.test.js`
+  (`verificador`, `sherlock`, `tokens`, `buscar-personas`). No hay tests de integración del REPL
+  ni de `index.js`.
 - **Los `.env` / secretos están expuestos.** El modelo lee cualquier archivo del directorio de
   trabajo; no lo lances en repos con credenciales.
 

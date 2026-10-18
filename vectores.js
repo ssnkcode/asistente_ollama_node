@@ -397,6 +397,9 @@ function metaDe(r) {
 }
 
 export async function buscarSimilares(consulta, { topK = 8, minScore = 0.15 } = {}) {
+  // Si nunca se indexó nada, no creamos el índice ni buscamos.
+  if (!(await fs.access(DIR_VECTORES).then(() => true).catch(() => false))) return [];
+
   const index = await getIndex();
   if (!(await index.isIndexCreated())) return [];
   const stats = await index.getIndexStats().catch(() => null);

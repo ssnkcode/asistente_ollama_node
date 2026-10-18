@@ -47,6 +47,8 @@ let ultimoStats = null;
 let ultimoRepoDir = CWD;
 // Directorio "actual" para resolver rutas relativas (lo cambia "navegá a ...").
 let dirActual = CWD;
+// ¿El usuario indexó/leyó algo en esta sesión? Si no, no se hace RAG por defecto.
+let hayMaterialIndexado = false;
 // Cambios detectados por la vigilancia automática (chokidar).
 let cambiosAuto = 0;
 // Carpetas ya indexadas (para no volcar el índice dos veces en el contexto).
@@ -56,6 +58,15 @@ const sucios = new Set();
 
 // Chunks recuperados por RAG para la pregunta en curso (se inyectan en el system).
 let contextoRecuperado = '';
+
+// Estas reglas SOLO se agregan al system cuando hay material recuperado, así el
+// asistente no se restringe cuando el usuario no indexó nada.
+const PROMPT_RAG = `RAG / BÚSQUEDA VECTORIAL (MUY IMPORTANTE):
+- El programa ya buscó en un índice vectorial LOCAL y los fragmentos más parecidos están ABAJO, en el bloque "[CONTEXTO RECUPERADO DEL ÍNDICE VECTORIAL ...]".
+- Para ESTA pregunta ese bloque es tu ÚNICA fuente: respondé EXCLUSIVAMENTE con esa información.
+- Si la respuesta no está en ese bloque, respondé exactamente: "No está en el material indexado." y nada más.
+- No completes con conocimiento previo, no adivines ni inventes rutas, funciones ni datos. Si afirmás algo, citá fragmentos del bloque con {"cita":[...]}.
+- Citá copiando el texto CASI TAL CUAL aparece en el bloque (sin reformular): cuanto más literal, mejor. Podés resumir, pero las palabras de cada cita deben existir en el bloque.`;
 
 function onCambioRepo(ev) {
   if (!ev || !ev.archivo) return;
@@ -138,17 +149,11 @@ REPOSITORIOS (IMPORTANTE):
 - Leer e indexar un repositorio NO lo hacés vos: lo hace EL PROGRAMA de forma automática y sin IA cuando el usuario pide "leé el repositorio ...". Vos NO tenés ninguna acción para leer repositorios.
 - La ESTRUCTURA/ÁRBOL/DIAGRAMA de carpetas y archivos tampoco la hacés vos: la genera EL PROGRAMA sin IA (equivalente a "tree /f", saltando node_modules, venv y similares).
 - Cuando en el mensaje de SISTEMA aparece un bloque "[CONTEXTO ACTUAL DEL REPOSITORIO ...]", o en el historial aparece un mensaje que empieza con "[REPOSITORIO INDEXADO ...]", "[REPOSITORIO YA INDEXADO ...]" o "[ESTRUCTURA DE CARPETAS ...]", ESA es la información real. Usala como fuente.
-- El repositorio YA está indexado y su índice está ARRIBA, en tu mensaje de SISTEMA (bloque "[CONTEXTO ACTUAL DEL REPOSITORIO ...]"). TENÉS esa información: NO digas "no tengo acceso", "no puedo leer repositorios" ni pidas que te lo den. Leé ese bloque y respondé con eso.
+- SOLO cuando aparece el bloque "[CONTEXTO ACTUAL DEL REPOSITORIO ...]" tenés un repositorio indexado: en ese caso NO digas "no tengo acceso", "no puedo leer repositorios" ni pidas que te lo den; leé ese bloque y respondé con eso. Si NO aparece ningún bloque de repositorio, no asumas que hay uno indexado: si el usuario quiere que analices algo, pedile la ruta o esperá a que te la dé.
 - Dentro del índice, la sección "RESUMEN DEL PROYECTO" trae el README y el package.json. PARA DECIR DE QUÉ TRATA EL PROYECTO, basate en ese RESUMEN y en la lista de archivos y SÍMBOLOS. No adivines.
 - Para cualquier pregunta sobre el repositorio o su estructura, respondé usando SOLO esa información. Si afirmás un dato, usá el protocolo de citas {"cita": [...]} con fragmentos exactos de esa fuente.
 - PROHIBIDO INVENTAR: no menciones carpetas, subcarpetas, archivos, rutas ni símbolos que NO aparezcan literalmente en [REPOSITORIO INDEXADO] o [ESTRUCTURA DE CARPETAS]. Si algo no figura, decí que no figura en el índice. No supongas la existencia de carpetas como "models", "actions", "docx", etc. si no están listadas.
 - NUNCA uses "leer_url" para repositorios.
-
-RAG / BÚSQUEDA VECTORIAL (MUY IMPORTANTE):
-- Antes de que respondas, EL PROGRAMA busca en un índice vectorial LOCAL (offline, sin IA) los fragmentos más parecidos a lo que pidió el usuario, y los inyecta en tu mensaje de SISTEMA dentro de un bloque "[CONTEXTO RECUPERADO DEL ÍNDICE VECTORIAL ...]".
-- Si ese bloque está presente, es tu ÚNICA fuente posible: respondé EXCLUSIVAMENTE con esa información.
-- Si la respuesta NO está en ese bloque, respondé exactamente: "No está en el material indexado." y nada más.
-- No completes con conocimiento previo, no adivines ni inventes rutas, funciones ni datos. Si afirmás algo, citá fragmentos literales del bloque con {"cita":[...]}.
 
 REGLAS DE BÚSQUEDA (NO LAS IGNORES):
 - SIEMPRE buscá. NUNCA te niegues a buscar un dato y NUNCA digas que no podés.
@@ -223,7 +228,10 @@ function aplicarContexto() {
   if (contextoRepo) {
     partes.push(`[CONTEXTO ACTUAL DEL REPOSITORIO — salida del programa; es fuente real]\n${contextoRepo}`);
   }
-  if (contextoRecuperado) partes.push(contextoRecuperado);
+  if (contextoRecuperado) {
+    partes.push(PROMPT_RAG);
+    partes.push(contextoRecuperado);
+  }
   historial[0].content = partes.join('\n\n');
 }
 
@@ -554,31 +562,10 @@ async function main() {
   registrarFuente(systemBase);
   historial = [{ role: 'system', content: systemBase }];
 
-  // --- Indexado AUTOMÁTICO del directorio actual + vigilancia (incremental) ---
-  try {
-    console.log(chalk.cyan('\n⚙ Indexando automáticamente el directorio actual (incremental)...'));
-    const r = await leerRepoConDir({ ruta: CWD });
-    ultimoRepoDir = r.dir;
-    indexados.add(r.dir);
-    registrarFuente(r.salida);
-    contextoRepo = r.salida;
-    aplicarContexto();
-    await vigilarRepo(r.dir, onCambioRepo);
-    console.log(chalk.green(`✔ Indexado automático listo. Vigilando cambios en ${r.dir}.\n`));
-  } catch (err) {
-    console.log(chalk.gray(`(Indexado automático no disponible: ${err.message})\n`));
-  }
-
-  // --- Indexado VECTORIAL (RAG) automático e incremental, 100% offline ---
-  if (RAG_ACTIVO) {
-    try {
-      console.log(chalk.cyan('⚙ Indexando vectores para RAG (offline, incremental)...'));
-      const rv = await indexarVectores(CWD);
-      console.log(chalk.green(`✔ Vectores listos: ${rv.totalChunks} chunks (${rv.nuevos} nuevos, ${rv.cambiados} cambiados, ${rv.eliminados} eliminados).\n`));
-    } catch (err) {
-      console.log(chalk.gray(`(Indexado vectorial no disponible: ${err.message})\n`));
-    }
-  }
+  // Sin indexado ni vigilancia automáticos: solo se lee/indexa/analiza lo que
+  // el usuario pide explícitamente (ej: "leé F:\carpeta", "analizá este repo",
+  // "de qué trata F:\docs\manual.pdf").
+  console.log(chalk.gray('   Nada se indexa solo. Pedí: "leé <ruta>", "analizá <repo>" o "de qué trata <archivo>".\n'));
 
   while (true) {
     const entrada = await preguntar(chalk.blue.bold('vos > '));
@@ -635,6 +622,7 @@ async function main() {
         try {
           if (RAG_ACTIVO) {
             const rv = await indexarArchivoVectores(objetivo.valor);
+            hayMaterialIndexado = true;
             const nota = `[DOCUMENTO INDEXADO PARA RAG] ${objetivo.valor} (${rv.chunks} fragmentos${rv.sinCambios ? ', sin cambios' : ''})`;
             console.log(chalk.green(`✔ Indexado: ${rv.chunks} fragmento(s)${rv.sinCambios ? ' (sin cambios)' : ''}.\n`));
             registrarFuente(entrada);
@@ -686,6 +674,7 @@ async function main() {
         if (RAG_ACTIVO) {
           try {
             const rv = await indexarVectores(dir);
+            hayMaterialIndexado = true;
             console.log(chalk.green(`✔ Vectores listos: ${rv.totalChunks} chunks (${rv.nuevos} nuevos, ${rv.cambiados} cambiados).\n`));
           } catch {
             console.log(chalk.yellow('  (No se pudieron indexar vectores de este directorio.)\n'));
@@ -702,7 +691,8 @@ async function main() {
     registrarFuente(entrada);
 
     // --- Recuperación vectorial (RAG): embedding local, SIN Ollama ---
-    if (RAG_ACTIVO) {
+    // Solo si en esta sesión pediste indexar/leer algo. Si no, es un chat normal.
+    if (RAG_ACTIVO && hayMaterialIndexado) {
       contextoRecuperado = '';
       try {
         const hits = await buscarSimilares(entrada, { topK: 6 });
@@ -804,7 +794,10 @@ async function main() {
 
         if (!accion) {
           // Verificar la respuesta en texto libre
-          const verif = verificarTexto(respuesta || historial[historial.length - 1]?.content || '');
+          const verif = verificarTexto(
+            respuesta || historial[historial.length - 1]?.content || '',
+            { citasFlexibles: !!contextoRecuperado }
+          );
           if (!verif.ok) {
             console.log(chalk.red.bold('\nasistente > [BLOQUEADO POR VERIFICADOR]'));
             console.log(chalk.red(`   ${verif.motivo}`));
